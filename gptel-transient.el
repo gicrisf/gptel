@@ -38,6 +38,12 @@
 (defvar-local gptel--rewrite-overlays nil
   "List of active rewrite overlays in the buffer.")
 
+(defun gptel--rewrite-sanitize-overlays ()
+  "Ensure gptel's rewrite overlays in buffer are consistent."
+  (setq gptel--rewrite-overlays
+        (cl-delete-if-not #'overlay-buffer
+                          gptel--rewrite-overlays)))
+
 (defvar gptel--set-buffer-locally nil
   "Set model parameters from `gptel-menu' buffer-locally.
 
@@ -393,13 +399,13 @@ Also format its value in the Transient menu."
      :if (lambda () (and gptel-expert-commands (not gptel-mode))))
     (gptel--infix-track-media
      :if (lambda () (and gptel-mode (gptel--model-capable-p 'media))))]
-   ["Prompt from"
+   [" <Prompt from"
     ("m" "Minibuffer instead" "m")
     ("y" "Kill-ring instead" "y")
     ""
     ("i" "Respond in place" "i")]
-    ["Response to"
-    ("e" "Echo area instead" "e")
+    [" >Response to"
+    ("e" "Echo area" "e")
     ("g" "gptel session" "g"
      :class transient-option
      :prompt "Existing or new gptel session: "
@@ -427,14 +433,15 @@ Also format its value in the Transient menu."
                    (concat
                     (and gptel--rewrite-overlays "Continue ")
                     (gptel--refactor-or-rewrite)))
-    :if (lambda () (or gptel--rewrite-overlays (use-region-p)))
+    :if (lambda () (or (use-region-p)
+                  (and gptel--rewrite-overlays
+                       (gptel--rewrite-sanitize-overlays))))
     ("r"
      ;;FIXME: Transient complains if I use `gptel--refactor-or-rewrite' here. It
      ;;reads this function as a suffix instead of a function that returns the
      ;;description.
-     (lambda () (if (derived-mode-p 'prog-mode)
-               "Refactor" "Rewrite"))
-     gptel-rewrite-menu)]
+     (lambda () (if (derived-mode-p 'prog-mode) "Refactor" "Rewrite"))
+     gptel-rewrite)]
    ["Tweak Response" :if gptel--in-response-p :pad-keys t
     ("SPC" "Mark" gptel--mark-response)
     ("P" "Previous variant" gptel--previous-variant
@@ -802,7 +809,7 @@ Or in an extended conversation:
   :format " %k %d %v"
   :key "d"
   :argument ":"
-  :description "Add directive"
+  :description "Add instruction"
   :transient t)
 
 

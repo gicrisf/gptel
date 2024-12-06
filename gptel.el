@@ -3,7 +3,7 @@
 ;; Copyright (C) 2023  Karthik Chikmagalur
 
 ;; Author: Karthik Chikmagalur <karthik.chikmagalur@gmail.com>
-;; Version: 0.9.6
+;; Version: 0.9.7
 ;; Package-Requires: ((emacs "27.1") (transient "0.4.0") (compat "29.1.4.1"))
 ;; Keywords: convenience
 ;; URL: https://github.com/karthink/gptel
@@ -36,7 +36,7 @@
 ;;
 ;; - The services ChatGPT, Azure, Gemini, Anthropic AI, Anyscale, Together.ai,
 ;;   Perplexity, Anyscale, OpenRouter, Groq, PrivateGPT, DeepSeek, Cerebras,
-;;   Github Models and Kagi (FastGPT & Summarizer)
+;;   Github Models, xAI and Kagi (FastGPT & Summarizer)
 ;; - Local models via Ollama, Llama.cpp, Llamafiles or GPT4All
 ;;
 ;;  Additionally, any LLM service (local or remote) that provides an
@@ -109,7 +109,7 @@
 ;;   Use a prefix argument (`C-u C-c RET') to access a menu.  In this menu you
 ;;   can set chat parameters like the system directives, active backend or
 ;;   model, or choose to redirect the input or output elsewhere (such as to the
-;;   kill ring).
+;;   kill ring or the echo area).
 ;;
 ;; - You can save this buffer to a file.  When opening this file, turn on
 ;;   `gptel-mode' before editing it to restore the conversation state and
@@ -134,8 +134,8 @@
 ;; Rewrite/refactor interface
 ;;
 ;; In any buffer: with a region selected, you can rewrite prose, refactor code
-;; or fill in the region.  Use gptel's menu (C-u M-x `gptel-send') to access
-;; this feature.
+;; or fill in the region.  This is accessible via `gptel-rewrite', and also from
+;; the `gptel-send' menu.
 ;;
 ;; gptel in Org mode:
 ;;
@@ -176,8 +176,8 @@
   'gptel-set-topic 'gptel-org-set-topic "0.7.5")
 
 (eval-when-compile
-  (require 'subr-x)
-  (require 'cl-lib))
+  (require 'subr-x))
+(require 'cl-lib)
 (require 'compat nil t)
 (require 'url)
 (require 'map)
@@ -397,30 +397,39 @@ transient menu interface provided by `gptel-menu'."
 
 ;; Model and interaction parameters
 (defcustom gptel-directives
-  '((default . "You are a large language model living in Emacs and a helpful assistant. Respond concisely.")
+  '((default     . "You are a large language model living in Emacs and a helpful assistant. Respond concisely.")
     (programming . "You are a large language model and a careful programmer. Provide code and only code as output without any additional text, prompt or note.")
-    (writing . "You are a large language model and a writing assistant. Respond concisely.")
-    (chat . "You are a large language model and a conversation partner. Respond concisely."))
+    (writing     . "You are a large language model and a writing assistant. Respond concisely.")
+    (chat        . "You are a large language model and a conversation partner. Respond concisely."))
   "System prompts or directives for the LLM.
 
-A \"directive\" is the system message (also called system prompt
-or system instruction) sent at the beginning of each request to
-the LLM.
+Each entry in this alist maps a symbol naming the directive to
+the directive itself.  By default, gptel uses the directive with
+the key \\+`default'.
 
-A directive can be
+To set the directive for a chat session interactively call
+`gptel-send' with a prefix argument, or call `gptel-menu'.
+
+A \"directive\" is typically the system message (also called
+system prompt or system instruction) sent at the beginning of
+each request to the LLM.  It is used to set general instructions,
+expectations and the overall tone.
+
+gptel's idea of the directive is more general.  A directive in
+`gptel-directives' can be
+
 - A string, interpreted as the system message.
+
 - A list of strings, whose first (possibly nil) element is
   interpreted as the system message, and the remaining elements
   as (possibly nil) alternating user prompts and LLM responses.
-  This can be used to template the intial part of a conversation.
+  This can be used to template the initial part of a conversation.
+
 - A function that returns a string or a list of strings,
   interpreted as the above.  This can be used to dynamically
   generate a system message and/or conversation template based on
-  the current context.
-
-Each entry in this alist maps a symbol naming the directive to
-the directive itself.  To set the directive for a chat session
-interactively call `gptel-send' with a prefix argument."
+  the current context.  See the definition of
+  `gptel--rewrite-directive-default' for an example."
   :safe #'always
   :type '(alist :key-type symbol :value-type string))
 
@@ -1260,8 +1269,8 @@ The request is asynchronous, the function immediately returns
 with the data that was sent.
 
 Note: This function is not fully self-contained.  Consider
-let-binding the parameters `gptel-backend' and `gptel-model'
-around calls to it as required.
+let-binding the parameters `gptel-backend', `gptel-model' and
+`gptel-use-context' around calls to it as required.
 
 If PROMPT is
 - a string, it is used to create a full prompt suitable for
@@ -1278,9 +1287,14 @@ Keyword arguments:
 CALLBACK, if supplied, is a function of two arguments, called
 with the RESPONSE (a string) and INFO (a plist):
 
- (callback RESPONSE INFO)
+ (funcall CALLBACK RESPONSE INFO)
 
-RESPONSE is nil if there was no response or an error.
+RESPONSE is
+
+- A string if the request was successful
+- nil if there was no response or an error.
+- The symbol `abort' if the request was aborted, see
+  `gptel-abort'.
 
 The INFO plist has (at least) the following keys:
 :data         - The request data included with the query
@@ -1288,13 +1302,14 @@ The INFO plist has (at least) the following keys:
                 POSITION is specified.
 :buffer       - The buffer current when the request was sent,
                 unless BUFFER is specified.
-:status       - Short string describing the result of the request
+:status       - Short string describing the result of the request, including
+                possible HTTP errors.
 
 Example of a callback that messages the user with the response
 and info:
 
  (lambda (response info)
-  (if response
+  (if (stringp response)
       (let ((posn (marker-position (plist-get info :position)))
             (buf  (buffer-name (plist-get info :buffer))))
         (message \"Response for request from %S at %d: %s\"
@@ -1337,8 +1352,23 @@ the response to determine if delimiters are needed between the
 prompt and the response.
 
 STREAM is a boolean that determines if the response should be
-streamed, as in `gptel-stream'. Do not set this if you are
-specifying a custom CALLBACK!
+streamed, as in `gptel-stream'.  The calling convention for
+streaming callbacks is slightly different:
+
+ (funcall CALLBACK RESPONSE INFO)
+
+- CALLBACK will be called with each response text chunk (a
+  string) as it is received.
+
+- When the HTTP request ends successfully, CALLBACK will be
+  called with a RESPONSE argument of t to indicate success.
+
+- If the HTTP request throws an error, CALLBACK will be called
+  with a RESPONSE argument of nil.  You can find the error via
+  (plist-get INFO :status).
+
+- If the request is aborted, CALLBACK will be called with a
+  RESPONSE argument of `abort'.
 
 If DRY-RUN is non-nil, construct and return the full
 query data as usual, but do not send the request.
@@ -1392,6 +1422,35 @@ Model parameters can be let-bound around calls to this function."
                    #'gptel-curl-get-response #'gptel--url-get-response)
                info callback))
     request-data))
+
+(defvar gptel--request-alist nil "Alist of active gptel requests.")
+
+(defun gptel-abort (buf)
+  "Stop any active gptel process associated with buffer BUF.
+
+BUF defaults to the current buffer."
+  (interactive (list (current-buffer)))
+  (when-let* ((proc-attrs
+               (cl-find-if (lambda (proc-list)
+                             (eq (plist-get (cdr proc-list) :buffer) buf))
+                           gptel--request-alist))
+              (proc (car proc-attrs))
+              (info (cdr proc-attrs)))
+    ;; Run callback with abort signal
+    (with-demoted-errors "Callback error: %S"
+      (funcall (plist-get info :callback) 'abort info))
+    (if gptel-use-curl
+        (progn                        ;Clean up Curl process
+          (setf (alist-get proc gptel--request-alist nil 'remove) nil)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)
+          (kill-buffer (process-buffer proc)))
+      (plist-put info :callback #'ignore)
+      (let (kill-buffer-query-functions)
+        (kill-buffer proc)))            ;Can't stop url-retrieve process
+    (with-current-buffer buf
+      (when gptel-mode (gptel--update-status  " Abort" 'error)))
+    (message "Stopped gptel request in buffer %S" (buffer-name buf))))
 
 ;; TODO: Handle multiple requests(#15). (Only one request from one buffer at a time?)
 ;;;###autoload
@@ -1705,18 +1764,25 @@ the response is inserted into the current buffer after point."
                              url-request-extra-headers))
                     "request headers"))
       (gptel--log url-request-data "request body"))
-    (url-retrieve (let ((backend-url (gptel-backend-url gptel-backend)))
-                    (if (functionp backend-url)
-                        (funcall backend-url) backend-url))
-                  (lambda (_)
-                    (pcase-let ((`(,response ,http-msg ,error)
-                                 (gptel--url-parse-response backend (current-buffer))))
-                      (plist-put info :status http-msg)
-                      (when error (plist-put info :error error))
-                      (funcall (or callback #'gptel--insert-response)
-                               response info)
-                      (kill-buffer)))
-                  nil t nil)))
+    (let ((proc-buf
+          (url-retrieve (let ((backend-url (gptel-backend-url gptel-backend)))
+                          (if (functionp backend-url)
+                              (funcall backend-url) backend-url))
+                        (lambda (_)
+                          (pcase-let ((`(,response ,http-msg ,error)
+                                       (gptel--url-parse-response backend (current-buffer)))
+                                      (buf (current-buffer)))
+                            (plist-put info :status http-msg)
+                            (when error (plist-put info :error error))
+                            (with-demoted-errors "gptel callback error: %S"
+                              (funcall (or callback #'gptel--insert-response)
+                                       response info))
+                            (setf (alist-get buf gptel--request-alist nil 'remove) nil)
+                            (kill-buffer buf)))
+                        nil t nil)))
+      (setf (alist-get proc-buf gptel--request-alist)
+          ;; TODO: Add transformer here.  NOTE: We need info to be mutated here.
+          (nconc info (list :callback callback :backend backend))))))
 
 (cl-defgeneric gptel--parse-response (backend response proc-info)
   "Response extractor for LLM requests.
